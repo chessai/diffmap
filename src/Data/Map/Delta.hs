@@ -16,6 +16,7 @@ module Data.Map.Delta
     DeltaUnit(..)
   , Delta(..)
   , M(..)
+  , Record(..)
 
     -- * Diffing 
   , diff
@@ -26,8 +27,11 @@ module Data.Map.Delta
   , getNew
   , getDelta
   , getOriginal
+  , getOriginals
 
-
+  , getRecord
+  , getRecordWith
+  
   , isSame
   , isOld
   , isNew
@@ -39,6 +43,9 @@ module Data.Map.Delta
   , toNew
   , toDelta
   , toOriginal
+  , toOriginals 
+  , toRecord
+  , toRecordWith
 
     -- * Mapping
   , mapSame
@@ -53,7 +60,7 @@ module Data.Map.Delta
 import           Data.Bool             (Bool(True, False))
 import           Data.Eq               (Eq((==)))
 import           Data.Foldable         (Foldable)
-import           Data.Function         ((.))
+import           Data.Function         ((.), ($))
 import           Data.Functor          (Functor(fmap))
 import           Data.Maybe            (Maybe(Just,Nothing))
 import           Data.Ord              (Ord)
@@ -95,6 +102,13 @@ data Delta a
 -- | M1 = First 'Map', M2 = Second 'Map'.
 --   Used as an argument for functions that care about which 'Map' to reconstruct.
 data M = M1 | M2
+
+data Record k a = Record
+  { key :: !k
+  , oldVal :: !(Maybe a)
+  , newVal :: !(Maybe a)
+  }
+  deriving (Eq, Foldable, Functor, Generic, Generic1, Ord, Show, Traversable)
 
 -- | Takes two 'Map's and returns a 'Map' from the same key type to 'Delta' 'a',
 --   where 'Delta' 'a' encodes differences between entries.
@@ -182,6 +196,44 @@ getOriginal M2 (New x)                 = Just x
 getOriginal _  (New _)                 = Nothing
 {-# INLINE getOriginal #-}
 
+-- | Get the original values out of the 'Delta'.
+getOriginals :: Delta a -> (Maybe a, Maybe a)
+getOriginals (Delta (DeltaUnit x y)) = (Just x, Just y)
+getOriginals (Same x) = (Just x, Just x)
+getOriginals (Old x) = (Just x, Nothing)
+getOriginals (New x) = (Nothing, Just x)
+{-# INLINE getOriginals #-}
+
+-- | Turn a 'Delta' into a 'Record'.
+getRecord :: k -> Delta a -> Record k a
+getRecord k (Delta (DeltaUnit d1 d2))
+                      = Record k (Just d1) (Just d2)
+getRecord k (Same  x) = Record k (Just x) (Just x)
+getRecord k (Old   x) = Record k (Just x) Nothing
+getRecord k (New   x) = Record k Nothing (Just x)
+{-# INLINE getRecord #-}
+
+-- | Turn a 'Delta' into a 'Record', applying a function
+--   to the values inside the 'Delta'.
+getRecordWith :: (a -> b) -> k -> Delta a -> Record k b
+getRecordWith f k (Delta (DeltaUnit f1 f2)) =
+  let o = Just $ f f1
+      n = Just $ f f2
+  in Record k o n
+getRecordWith f k (Same x) =
+  let o = Just $ f x
+      n = Just $ f x
+  in Record k o n
+getRecordWith f k (Old x) =
+  let o = Just $ f x
+      n = Nothing
+  in Record k o n
+getRecordWith f k (New x) =
+  let o = Nothing
+      n = Just $ f x
+  in Record k o n
+{-# INLINE getRecordWith #-}
+
 -- | Retrieve the 'Same' values out of the diff map.
 toSame :: Eq a => Map k (Delta a)
        -> Map k a
@@ -207,15 +259,39 @@ toDelta = DMS.mapMaybe getDelta
 {-# INLINE toDelta #-}
 
 -- | Construct either the old 'Map' or new 'Map' from a diff
-toOriginal :: M -> Map k (Delta a) -> Map k a
+toOriginal :: M
+           -> Map k (Delta a)
+           -> Map k a
 toOriginal m = DMS.mapMaybe (getOriginal m)
 {-# INLINE toOriginal #-}
+
+-- | Reconstruct both original 'Map's.
+toOriginals :: Map k (Delta a)
+            -> (Map k a, Map k a)
+toOriginals m = (DMS.mapMaybe (getOriginal M1) m, DMS.mapMaybe (getOriginal M2) m)
+
+-- | Construct a 'Map' for 'Record's from 'Delta's.
+toRecord :: Map k (Delta a)
+         -> Map k (Record k a)
+toRecord = DMS.mapWithKey getRecord
+{-# INLINE toRecord #-}
+
+-- | Construct a 'Map' for 'Record's from 'Delta's,
+--   applying a function to each value of the 'Delta'.
+toRecordWith :: (a -> b)
+             -> Map k (Delta a)
+             -> Map k (Record k b)
+toRecordWith f = DMS.mapWithKey (getRecordWith f)
+{-# INLINE toRecordWith #-}
 
 -- | Map over all 'Same' values, returning a map of just
 --   the transformed values.
 --   This can be more efficient than calling 'toSame' and
 --   then Data.Map's 'DMS.map'.
-mapSame :: Eq a => (a -> b) -> Map k (Delta a) -> Map k b
+mapSame :: Eq a
+        => (a -> b)
+        -> Map k (Delta a)
+        -> Map k b
 mapSame f = DMS.mapMaybe (fmap f . getSame)
 {-# INLINABLE mapSame #-}
 
@@ -223,7 +299,9 @@ mapSame f = DMS.mapMaybe (fmap f . getSame)
 --   the transformed values.
 --   This can be more efficient than calling 'toOld' and
 --   then Data.Map's 'DMS.map'.
-mapOld :: (a -> b) -> Map k (Delta a) -> Map k b
+mapOld :: (a -> b)
+       -> Map k (Delta a)
+       -> Map k b
 mapOld f = DMS.mapMaybe (fmap f . getOld)
 {-# INLINE mapOld #-}
 
@@ -231,34 +309,42 @@ mapOld f = DMS.mapMaybe (fmap f . getOld)
 --   the transformed values.
 --   This can be more efficient than calling 'toNew' and
 --   then Data.Map's 'DMS.map'.
-mapNew :: (a -> b) -> Map k (Delta a) -> Map k b
+mapNew :: (a -> b)
+       -> Map k (Delta a)
+       -> Map k b
 mapNew f = DMS.mapMaybe (fmap f . getNew)
 {-# INLINE mapNew #-}
 
 -- | Map over all the 'Same' values, preserving the
 --   remaining values in the map.
-mapSame' :: Eq a => (a -> a) -> Map k (Delta a) -> Map k (Delta a)
+mapSame' :: Eq a
+         => (a -> a)
+         -> Map k (Delta a)
+         -> Map k (Delta a)
 mapSame' f = DMS.map (\x -> if isSame x then fmap f x else x)
 {-# INLINABLE mapSame' #-}
 
 -- | Map over all the 'Old' values, preserving the
 --   remaining values in the map.
-mapOld' :: forall k a. (a -> a) -> Map k (Delta a) -> Map k (Delta a)
+mapOld' :: (a -> a)
+        -> Map k (Delta a)
+        -> Map k (Delta a)
 mapOld' f = DMS.map go
   where
-    go :: Delta a -> Delta a
     go (Old x) = Old (f x)
     go (Delta (DeltaUnit x y)) = Delta (DeltaUnit (f x) y)
     go x = x
+{-# INLINE mapOld' #-}
 
 -- | Map over all the 'New' values, preserving the
 --   remaining values in the map.
-mapNew' :: forall k a. (a -> a) -> Map k (Delta a) -> Map k (Delta a)
+mapNew' :: (a -> a)
+        -> Map k (Delta a)
+        -> Map k (Delta a)
 mapNew' f = DMS.map go
   where
-    go :: Delta a -> Delta a
     go (New x) = New (f x)
     go (Delta (DeltaUnit x y)) = Delta (DeltaUnit x (f y))
     go x = x
-
+{-# INLINE mapNew' #-}
 
